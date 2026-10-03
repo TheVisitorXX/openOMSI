@@ -655,6 +655,19 @@ pub(crate) fn server_command(lan: &mut LanSession, from: u32, text: &str, adm: &
 pub(crate) fn guard_fall(app: &mut App, dt: f32) {
     let Some(p) = app.player.as_ref() else { return };
     let at = p.vehicle.position;
+    // off the map: a tile global.cfg does not list has no ground and is never read, and the
+    // frame holds a bus with no ground under it - past the map's edge it stood there for good
+    let tile_of = |x: f64, y: f64| ((x / omsi_map::tile_size()).floor() as i32, (y / omsi_map::tile_size()).floor() as i32);
+    let key = tile_of(at.x, at.y);
+    let off_map = app.world.as_ref().is_some_and(|w| !w.terrains.read().contains_key(&key) && !w.surfaces.read().contains_key(&key) && !w.has_tile(key));
+    if off_map {
+        if let Some((pos, heading)) = app.safe_pose {
+            log::warn!("the bus left the map at ({:.1}, {:.1}): put back at ({:.1}, {:.1})", at.x, at.y, pos.x, pos.y);
+            teleport(app, pos, heading);
+            app.service_msg = Some(("The bus drove off the map: it was put back where it last stood".into(), 5.0));
+        }
+        return;
+    }
     // the ground under the bus (the face at or below it: on a car park's lower level the
     // building's roof is not its ground - measured from the roof, a bus driving under it
     // had fallen through the world and was put up there), and the highest there is
@@ -679,7 +692,12 @@ pub(crate) fn guard_fall(app: &mut App, dt: f32) {
     if app.safe_age >= 1.0 {
         if let Some(g) = under.filter(|g| (at.z - g).abs() < 2.5) {
             app.safe_age = 0.0;
-            app.safe_pose = Some((glam::DVec3::new(at.x, at.y, g), p.vehicle.heading));
+            // (not within 20 m of the map's edge: a bus put back there and still driven on
+            // left the map again at once, and the place came nearer the edge each time)
+            let inside = app.world.as_ref().is_none_or(|w| [(20.0, 0.0), (-20.0, 0.0), (0.0, 20.0), (0.0, -20.0)].iter().all(|(dx, dy)| w.has_tile(tile_of(at.x + dx, at.y + dy))));
+            if inside {
+                app.safe_pose = Some((glam::DVec3::new(at.x, at.y, g), p.vehicle.heading));
+            }
         }
     }
 }
