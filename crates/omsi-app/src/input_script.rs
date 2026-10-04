@@ -1372,7 +1372,7 @@ impl App {
     }
 
     /// The ray under the cursor now (see [`Self::cockpit_cursor_ray`]).
-    fn cursor_ray_now(&self) -> Option<(glam::DVec3, glam::Vec3, f32)> {
+    pub(crate) fn cursor_ray_now(&self) -> Option<(glam::DVec3, glam::Vec3, f32)> {
         let (cam, s) = self.camera.as_ref().zip(self.surface.as_ref())?;
         Some(self.cockpit_cursor_ray(cam, (s.config.width, s.config.height)))
     }
@@ -1544,9 +1544,11 @@ impl App {
                         }
                     } else {
                         if press {
+                            self.foot_press(true);
                             self.on_left(true);
                         }
                         if release {
+                            self.foot_press(false);
                             self.on_left(false);
                         }
                     }
@@ -3952,7 +3954,7 @@ impl App {
         } else if self.game_menu.is_some() {
             // (the game menu's own cursor: not overwritten here, or it flips back and forth)
             self.menu_cursor_kind()
-        } else if self.hover.is_some() || self.hover_hand {
+        } else if self.hover.is_some() || self.hover_hand || self.seat_hover.is_some() {
             1
         } else {
             0

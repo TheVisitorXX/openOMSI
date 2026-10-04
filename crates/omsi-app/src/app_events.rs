@@ -288,6 +288,8 @@ impl ApplicationHandler for App {
                         self.mouse_look = self.buttons_held.1;
                         self.update_hover();
                     }
+                    // (on foot: held long, a click sits down or gets up)
+                    self.foot_press(pressed);
                     self.left_button(event_loop, pressed);
                 }
             }
@@ -1970,7 +1972,7 @@ impl ApplicationHandler for App {
                     // know internal, mostly German names)
                     let names = describe::names(&self.args.root, &self.settings.language);
                     // next to the cursor (`ui`), when the setting asks for it
-                    let tooltip = self.hover.as_ref().map(|h| names.control(h));
+                    let tooltip = self.hover.as_ref().map(|h| names.control(h)).or_else(|| self.seat_hover.map(String::from));
                     // the object editor's keys, while it is on (one quiet line)
                     if self.editor.is_some() {
                         lines.push("Object editor: click picks · drag moves · wheel turns (Shift lifts) · Del · C copy · V variant · Backspace undo · Ctrl+S save · Esc".into());

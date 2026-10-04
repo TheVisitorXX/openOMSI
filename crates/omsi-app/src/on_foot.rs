@@ -4,13 +4,16 @@
 //! (F1), F4 lets the free camera go (the walker waits), F1 comes back. G by a bus's door takes a free
 //! passenger seat in it (the player's own bus, a timetable bus, another player's), G again
 //! gets up and out by the nearest door; G at the own bus's front door sits back at the
-//! wheel. Other buses are never driven.
+//! wheel. Other buses are never driven. Inside a bus a long left click (held 0.6 s) on a
+//! free seat sits down on it, one while seated gets up, and one on the own bus's driver's
+//! seat is back at the wheel. At the wheel a long click (not on a switch) gets up, as
+//! Ctrl+Shift+G does.
 //!
 //! The walker is an avatar of the people's animation (`Humans::avatar`): the gait with its
 //! feet on the ground, turning, sitting down on a seat and getting up are the passengers'
 //! own, eased as theirs are; the camera eases into each new view instead of cutting.
 
-use crate::humans::{AvatarCmd, BusId, Humans};
+use crate::humans::{AvatarCmd, BusId, Humans, SeatHit};
 use crate::App;
 use glam::{DVec2, DVec3};
 use omsi_sim::collision::Obb;
@@ -25,6 +28,12 @@ const WALK: f64 = 1.45;
 const RUN: f64 = 4.3;
 const ACCEL: f64 = 7.0;
 const JUMP: f64 = 4.0;
+/// How long (s) the left button is held for a long click, and how far (px) the cursor may
+/// wander meanwhile (further: it was a drag, not a click).
+const LONG_CLICK: f32 = 0.6;
+const LONG_CLICK_SLACK: f32 = 12.0;
+/// How far (m) a long click reaches to a seat.
+const SEAT_REACH: f64 = 6.0;
 /// How near a door (m) G gets in.
 const DOOR_REACH: f64 = 3.2;
 /// The walker's radius against walls and vehicles (m).
@@ -285,7 +294,11 @@ impl App {
         // there is no standing room in such a cab, the driver who got up stood with their
         // head in the roof over the windscreen
         let cab_door = self.humans.as_mut().and_then(|h| h.vehicle_cab_door(v));
-        let outside = match (cab_door, side.abs() > 0.45, self.humans.as_mut()) {
+        // A bus with room to stand by the driver: up beside the seat, inside - out of it
+        // through an open door or with Ctrl+Shift+G. (Looking towards the door, the driver
+        // who got up was walked straight out through it, shut or not, and flung out of the
+        // seat.)
+        let outside = match (cab_door, side.abs() > 0.45 && stand.is_none(), self.humans.as_mut()) {
             (Some(d), _, Some(_)) => outside_at(self.world.as_deref(), v, &others, d),
             (None, true, Some(h)) => outside_spot(h, self.world.as_deref(), v, &others, side.signum(), seat_w),
             _ => None,
@@ -323,7 +336,7 @@ impl App {
             arrive: None,
         });
         self.view = "foot".into();
-        self.service_msg = Some(("On foot: W A S D walk, Shift runs, F4 free camera / F1 back, G sits down (by the driver's place: back at the wheel), Ctrl+Shift+G steps out of the bus".into(), 7.0));
+        self.service_msg = Some(("On foot: W A S D walk, Shift runs, F4 free camera / F1 back, G or a long click on a seat sits down (on the driver's seat: back at the wheel), Ctrl+Shift+G steps out of the bus".into(), 7.0));
     }
 
     /// Ctrl+Shift+G inside a bus: out by its nearest door, open or shut (getting up now
@@ -760,6 +773,90 @@ impl App {
         }
     }
 
+    /// The left button out of the walker's eyes, or at the wheel: held long enough (and not
+    /// dragged, nor on a switch) it is a long click (`long_click`), worked from
+    /// `tick_on_foot`. A short click goes on to the bus's switches as before (the stop
+    /// button is pressed from a seat).
+    pub(crate) fn foot_press(&mut self, pressed: bool) {
+        let menu = self.game_menu.is_some() || self.navigator.as_ref().is_some_and(|n| n.map_open());
+        let walking = self.on_foot.as_ref().is_some_and(|f| f.cam == FootCam::First) && self.view == "foot";
+        // (at the wheel: not with the mouse steering, whose button is the wheel's)
+        let driving = self.on_foot.is_none() && self.player.is_some() && self.view == "driver" && self.settings.get_up && !self.mouse_drive && !self.vr_active();
+        self.left_hold = (pressed && !menu && (walking || driving)).then_some((0.0, self.cursor));
+    }
+
+    /// What a long click would do with the seat under the cursor, out of the walker's eyes
+    /// in a bus (a switch under it comes first: its own name is shown).
+    fn seat_label(&self) -> Option<&'static str> {
+        // at the wheel: the driver's seat gets up (a long click anywhere off a switch does)
+        if self.on_foot.is_none() {
+            if self.player.is_none() || self.view != "driver" || !self.settings.get_up || self.mouse_drive || self.vr_active() || self.game_menu.is_some() || self.cursor_hidden.is_some() || self.mouse_look || self.hover.is_some() || self.hover_hand {
+                return None;
+            }
+            let (o, d, _) = self.cursor_ray_now()?;
+            return self.humans.as_ref()?.driver_cushion_on_ray(o, d.as_dvec3(), 2.0).then_some("Stand up");
+        }
+        let f = self.on_foot.as_ref()?;
+        if f.cam != FootCam::First || self.view != "foot" || f.transit.is_some() || self.game_menu.is_some() || self.cursor_hidden.is_some() || self.mouse_look || self.hover.is_some() || self.hover_hand {
+            return None;
+        }
+        let seated = f.seat;
+        let bus = self.foot_bus()?;
+        let (o, d, _) = self.cursor_ray_now()?;
+        Some(match self.humans.as_ref()?.seat_on_ray(bus, o, d.as_dvec3(), SEAT_REACH)? {
+            SeatHit::Driver if self.player.is_some() => "Take the wheel",
+            SeatHit::Driver => return None,
+            SeatHit::Seat(k, _) if seated == Some((bus, k)) => "Stand up",
+            SeatHit::Seat(_, true) => "Sit down",
+            SeatHit::Seat(_, false) => "Seat taken",
+        })
+    }
+
+    /// A long left click on foot: on a free seat of the bus one is in, sit down on it; on
+    /// the own bus's driver's seat, back at the wheel; anywhere else while seated, get up.
+    fn long_click(&mut self) {
+        // (a switch under the cursor is the click's, held or not)
+        if self.hover.is_some() || self.hover_hand {
+            return;
+        }
+        // at the wheel: up from the driver's seat, as from any other
+        if self.on_foot.is_none() {
+            if self.player.is_some() && self.view == "driver" {
+                self.get_up();
+            }
+            return;
+        }
+        let Some(f) = self.on_foot.as_ref() else { return };
+        if f.transit.is_some() {
+            return;
+        }
+        let seated = f.seat;
+        let Some(bus) = self.foot_bus() else { return };
+        let hit = self.cursor_ray_now().and_then(|(o, d, _)| self.humans.as_ref()?.seat_on_ray(bus, o, d.as_dvec3(), SEAT_REACH));
+        if omsi_cfg::env::var_os("OMSI_DEBUG_FOOT").is_some() {
+            log::info!("on foot: long click in {bus:?}, seated {seated:?}, ray {:?}: {hit:?}", self.cursor_ray_now().map(|r| (r.0, r.1)));
+        }
+        match hit {
+            Some(SeatHit::Driver) if self.player.is_some() => {
+                self.sit_at_the_wheel();
+                self.service_msg = Some(("Back at the wheel".into(), 3.0));
+            }
+            Some(SeatHit::Seat(k, _)) if seated == Some((bus, k)) => self.use_seat(),
+            Some(SeatHit::Seat(k, true)) => {
+                let f = self.on_foot.as_mut().unwrap();
+                f.seat = Some((bus, k));
+                f.inside = None;
+                f.face_seat = true;
+                f.vel = DVec2::ZERO;
+                self.service_msg = Some(("Seated: hold the left mouse button to stand up".into(), 3.0));
+            }
+            Some(SeatHit::Seat(_, false)) => self.service_msg = Some(("This seat is taken".into(), 2.0)),
+            // (seated, a long click elsewhere gets up)
+            _ if seated.is_some() => self.use_seat(),
+            _ => self.service_msg = Some(("No seat there: hold the left button on a free seat to sit down".into(), 3.0)),
+        }
+    }
+
     /// Turn the walker's view (right mouse button, arrows).
     pub(crate) fn foot_look(&mut self, dx: f32, dy: f32) {
         if let Some(f) = self.on_foot.as_mut() {
@@ -784,6 +881,44 @@ impl App {
                 }
             }
             _ => {}
+        }
+        // the left button held: a long click once it has been held long enough (a switch
+        // grabbed with it, or the cursor dragged away, is no long click)
+        let cursor = self.cursor;
+        let dragging = self.dragging;
+        let on_page = self.html_pressed.is_some();
+        let long = match self.left_hold.as_mut() {
+            Some((t, at)) if !dragging && !on_page && (cursor.0 - at.0).abs() + (cursor.1 - at.1).abs() <= LONG_CLICK_SLACK => {
+                *t += dt;
+                *t >= LONG_CLICK
+            }
+            Some(_) => {
+                self.left_hold = None;
+                false
+            }
+            None => false,
+        };
+        if long {
+            self.left_hold = None;
+        }
+        // the seat under the cursor: the hand and its label (recomputed every frame: the
+        // walker and the bus move under a cursor that stands still)
+        // (on foot what is under the cursor changes as the walker and the bus move: the
+        // switches are looked for every frame, else one walked up to with the mouse held
+        // still stayed unnamed and the seat behind it was offered instead - a door button)
+        if self.on_foot.is_some() && self.view == "foot" {
+            self.update_hover();
+        }
+        let label = self.seat_label();
+        if label != self.seat_hover {
+            self.seat_hover = label;
+            self.update_hover();
+        }
+        if long {
+            self.long_click();
+            if self.on_foot.is_none() {
+                return;
+            }
         }
         let Some(mut f) = self.on_foot.take() else { return };
         let dt64 = dt as f64;
@@ -985,11 +1120,14 @@ impl App {
         }
         // seated, the walker is where the seat is
         let body = self.humans.as_ref().and_then(|h| h.avatar_body(AVATAR_KEY));
-        if let (Some((feet, heading, _)), Some(_)) = (body, f.seat) {
+        if let (Some((feet, heading, _)), Some((bus, k))) = (body, f.seat) {
             f.pos = feet;
             f.heading = heading;
             if f.face_seat {
-                let d = wrap(heading - f.yaw as f64);
+                // the view turns to where the seat faces (the body still faced where the eyes
+                // looked as it sat down: turning to it ended at once)
+                let to = self.humans.as_ref().and_then(|h| h.seat_heading(bus, k)).unwrap_or(heading);
+                let d = wrap(to - f.yaw as f64);
                 f.yaw = (f.yaw as f64 + d * (1.0 - (-dt64 * 4.0).exp())) as f32;
                 f.pitch += (-5.0 - f.pitch) * (1.0 - (-dt * 4.0).exp());
                 if d.abs() < 2.0 {

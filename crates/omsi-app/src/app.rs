@@ -119,6 +119,9 @@ pub(crate) struct App {
     pub(crate) hover_part: Option<String>,
     /// A `[mouseevent]` mesh is under the cursor (named in `hover` or not): the hand cursor.
     pub(crate) hover_hand: bool,
+    /// On foot: what a long click would do with the seat under the cursor (its label by
+    /// the cursor, which turns into the hand there).
+    pub(crate) seat_hover: Option<&'static str>,
     /// `OMSI_INPUT` script: (seconds after start, command), in order.
     pub(crate) input_script: Vec<(f32, String)>,
     /// `shot <file>` of the input script: the next frame is also rendered into this PNG.
@@ -208,6 +211,9 @@ pub(crate) struct App {
     pub(crate) ego: bool,
     /// The player out of the seat, walking about (`on_foot`).
     pub(crate) on_foot: Option<crate::on_foot::OnFoot>,
+    /// The left button held down for a long click (on foot out of the eyes, or at the
+    /// wheel): for how long (s) and where the cursor was when it went down.
+    pub(crate) left_hold: Option<(f32, (f32, f32))>,
     /// Other players on foot whose avatars are drawn (their ids).
     pub(crate) remote_walkers: Vec<u32>,
     /// The camera is in the own bus's cab this frame (see RedrawRequested).

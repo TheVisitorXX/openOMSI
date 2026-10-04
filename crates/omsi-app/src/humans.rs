@@ -717,6 +717,48 @@ fn train_heading(heading: f64, trailers: &[PartFrame], local: Vec3) -> f64 {
     here
 }
 
+/// Where the ray from `o` along `d` enters the box `lo`..`hi` (how far along it; 0 from
+/// inside), None when it misses it or the box is behind.
+fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
+    let (mut t0, mut t1) = (0.0f32, f32::INFINITY);
+    for i in 0..3 {
+        if d[i].abs() < 1e-6 {
+            if o[i] < lo[i] || o[i] > hi[i] {
+                return None;
+            }
+            continue;
+        }
+        let (a, b) = ((lo[i] - o[i]) / d[i], (hi[i] - o[i]) / d[i]);
+        t0 = t0.max(a.min(b));
+        t1 = t1.min(a.max(b));
+    }
+    (t0 <= t1).then_some(t0)
+}
+
+/// Which of the seats (hip point, half width) the ray from `o` along unit `d` points at
+/// within `reach`: of those whose box (the floor to the top of the back) it passes
+/// through, the one whose middle it passes nearest. (The nearest box along the ray was
+/// taken before: seats side by side overlap, and clicking the window seat from the aisle
+/// sat one down on the aisle seat, whose back the ray went through first.)
+fn nearest_seat(o: Vec3, d: Vec3, reach: f32, seats: impl Iterator<Item = (Vec3, f32)>) -> Option<usize> {
+    // how near the ray passes the line from the cushion up the back
+    let miss = |hip: Vec3| -> f32 {
+        (0..=6)
+            .map(|i| {
+                let p = hip + Vec3::Z * (-0.1 + 0.1 * i as f32);
+                let t = (p - o).dot(d).max(0.0);
+                (o + d * t - p).length()
+            })
+            .fold(f32::INFINITY, f32::min)
+    };
+    seats
+        .enumerate()
+        .filter(|(_, (hip, half))| ray_box(o, d, *hip - Vec3::new(*half, *half, 0.5), *hip + Vec3::new(*half, *half, 0.6)).is_some_and(|t| t < reach))
+        .map(|(k, (hip, _))| (k, miss(hip)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|x| x.0)
+}
+
 impl BusNow {
     fn world(&self, local: Vec3) -> DVec3 {
         train_point(self.pos, &self.rot, &self.trailers, local)
@@ -4644,6 +4686,15 @@ pub struct SeatSpot {
     pub seat: usize,
 }
 
+/// What a click in a bus points at (`Humans::seat_on_ray`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeatHit {
+    /// This passenger seat, and whether it is free.
+    Seat(usize, bool),
+    /// The own bus's driver's seat.
+    Driver,
+}
+
 impl Humans {
     /// Put avatar `key` where `cmd` says (made on its first call, of figure `kind`).
     pub fn avatar(&mut self, key: u32, world: &World, renderer: &Renderer, scene: &mut Scene, cmd: AvatarCmd, kind: u64) {
@@ -4893,6 +4944,46 @@ impl Humans {
             .filter(|(_, d)| *d < reach)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|x| x.0)
+    }
+
+    /// What the ray from `o` along unit `d` points at in bus `bus` within `reach` metres:
+    /// a seat (and whether it is free) or the driver's seat.
+    pub fn seat_on_ray(&self, bus: BusId, o: DVec3, d: DVec3, reach: f64) -> Option<SeatHit> {
+        let bn = self.last_buses.iter().find(|b| b.id == bus)?;
+        let taken = self.seats.get(&bn.id);
+        // in the cabin's frame (the seats' boxes stand square in it)
+        let lo = bn.to_local(o);
+        let ld = (bn.to_local(o + d) - lo).normalize_or_zero();
+        let mut spots: Vec<(Vec3, f32, SeatHit)> = bn
+            .cabin
+            .seats
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.seated)
+            .map(|(k, s)| (s.pos, 0.25, SeatHit::Seat(k, !taken.and_then(|t| t.get(k)).copied().unwrap_or(false))))
+            .collect();
+        if bus == BusId::Player {
+            spots.extend(bn.cabin.data.driver_positions.first().map(|p| (Vec3::from(p.pos), 0.4, SeatHit::Driver)));
+        }
+        nearest_seat(lo, ld, reach as f32, spots.iter().map(|s| (s.0, s.1))).map(|k| spots[k].2)
+    }
+
+    /// Whether the ray from `o` along unit `d` points at the own bus's driver's seat from the
+    /// wheel: its cushion only (the eyes there are about as high as the top of its back, and
+    /// the whole seat's box held them).
+    pub fn driver_cushion_on_ray(&self, o: DVec3, d: DVec3, reach: f64) -> bool {
+        let Some(bn) = self.last_buses.iter().find(|b| b.id == BusId::Player) else { return false };
+        let Some(hip) = bn.cabin.data.driver_positions.first().map(|p| Vec3::from(p.pos)) else { return false };
+        let lo = bn.to_local(o);
+        let ld = (bn.to_local(o + d) - lo).normalize_or_zero();
+        ray_box(lo, ld, hip - Vec3::new(0.35, 0.35, 0.5), hip + Vec3::new(0.35, 0.35, 0.15)).is_some_and(|t| t > 0.0 && (t as f64) < reach)
+    }
+
+    /// Which way seat `seat` of bus `bus` faces now (degrees, OMSI's, in the world).
+    pub fn seat_heading(&self, bus: BusId, seat: usize) -> Option<f64> {
+        let bn = self.last_buses.iter().find(|b| b.id == bus)?;
+        let s = bn.cabin.seats.get(seat)?;
+        Some(bn.heading_at(s.pos) + s.rot as f64)
     }
 
     /// The cabin path point nearest seat `seat` of bus `bus` (where one stands up to).
@@ -5365,6 +5456,33 @@ impl Humans {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_window_seat_clicked_from_the_aisle_is_the_window_seat() {
+        // a pair of seats facing forwards (+y): the aisle one at x = 0.45, the window one
+        // at x = 0.9; the eyes in the aisle beside and behind them
+        let seats = [(Vec3::new(0.45, 0.0, 0.5), 0.25), (Vec3::new(0.9, 0.0, 0.5), 0.25)];
+        let eye = Vec3::new(0.0, -0.6, 1.6);
+        let at = |p: Vec3| (p - eye).normalize();
+        // the window seat's cushion, and its back
+        assert_eq!(super::nearest_seat(eye, at(Vec3::new(0.9, 0.05, 0.5)), 6.0, seats.into_iter()), Some(1));
+        assert_eq!(super::nearest_seat(eye, at(Vec3::new(0.9, -0.2, 0.95)), 6.0, seats.into_iter()), Some(1));
+        // the aisle seat's cushion
+        assert_eq!(super::nearest_seat(eye, at(Vec3::new(0.45, 0.05, 0.5)), 6.0, seats.into_iter()), Some(0));
+    }
+
+    #[test]
+    fn a_seat_is_hit_on_its_cushion_and_its_back_not_beside_it() {
+        let (lo, hi) = (Vec3::new(-0.28, -0.28, 0.0), Vec3::new(0.28, 0.28, 1.1));
+        // looking down at the cushion from standing in the aisle a metre away
+        let eye = Vec3::new(1.0, 0.0, 1.6);
+        let at = |p: Vec3| (p - eye).normalize();
+        assert!(super::ray_box(eye, at(Vec3::new(0.0, 0.2, 0.5)), lo, hi).is_some());
+        assert!(super::ray_box(eye, at(Vec3::new(0.0, -0.25, 1.05)), lo, hi).is_some());
+        // beside it, and behind the eyes
+        assert!(super::ray_box(eye, at(Vec3::new(0.0, 0.8, 0.5)), lo, hi).is_none());
+        assert!(super::ray_box(eye, -at(Vec3::new(0.0, 0.0, 0.5)), lo, hi).is_none());
+    }
+
     use super::*;
 
     /// Off a bus 3 m from the pavement's path (along y), walking onto it at 1.1 m/s: hardly
