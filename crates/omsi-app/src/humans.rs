@@ -858,6 +858,21 @@ fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
     (t0 <= t1).then_some(t0)
 }
 
+/// Where one stands up to from the driver's seat (its hip point `seat`): the path point
+/// nearest the place beside the seat on the aisle's side, level with it. (The point nearest
+/// the seat itself was in 44 of the 188 cabins of a full installation the one behind it,
+/// and the driver who got up stood behind the cab.)
+fn stand_beside(seat: Vec3, points: &[Vec3]) -> Option<Vec3> {
+    // (a driver in the middle - a tram's - has no aisle side: straight beside)
+    let side = if seat.x.abs() > 0.2 { -seat.x.signum() * 0.55 } else { 0.0 };
+    let beside = glam::Vec2::new(seat.x + side, seat.y);
+    // the driver's position is the hip, half a metre over the cab floor: a double decker's
+    // upper deck lies straight over the cab and was as near in plan, and the driver who got
+    // up stood in the roof over the windscreen
+    let d = |a: &Vec3| (a.truncate() - beside).length() + (a.z - (seat.z - 0.5)).abs() * 3.0;
+    points.iter().copied().min_by(|a, b| d(a).total_cmp(&d(b)))
+}
+
 /// Which of the seats (hip point, half width) the ray from `o` along unit `d` points at
 /// within `reach`: of those whose box (the floor to the top of the back) it passes
 /// through, the one whose middle it passes nearest. (The nearest box along the ray was
@@ -5219,11 +5234,7 @@ impl Humans {
     pub fn driver_stand(&mut self, v: &VehicleInstance) -> Option<Vec3> {
         let cabin = self.cabin_for(v)?;
         let seat = cabin.data.driver_positions.first().map(|d| Vec3::from(d.pos)).unwrap_or(Vec3::new(-0.8, 4.5, 1.0));
-        // the driver's position is the hip, half a metre over the cab floor: a double
-        // decker's upper deck lies straight over the cab and was as near in plan, and the
-        // driver who got up stood in the roof over the windscreen
-        let d = |a: &Vec3| (a.truncate() - seat.truncate()).length() + (a.z - (seat.z - 0.5)).abs() * 3.0;
-        cabin.graph.points.iter().copied().min_by(|a, b| d(a).total_cmp(&d(b)))
+        stand_beside(seat, &cabin.graph.points)
     }
 
     /// How many people are in (or boarding, riding, leaving) bus `bus`.
@@ -5667,6 +5678,17 @@ impl Humans {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_driver_gets_up_beside_the_seat_not_behind_the_cab() {
+        // the MAN SD80's driver's seat and the path points round it (Model/paths.cfg)
+        let seat = Vec3::new(-0.72, 4.639, 1.3);
+        let points = [Vec3::new(1.25, 5.018, 0.46), Vec3::new(0.551, 5.018, 0.57), Vec3::new(0.223, 4.608, 0.57), Vec3::new(0.0, 4.095, 0.57)];
+        assert_eq!(super::stand_beside(seat, &points), Some(points[2]));
+        // a right-hand drive: the same, mirrored
+        let mirrored: Vec<Vec3> = points.iter().map(|p| Vec3::new(-p.x, p.y, p.z)).collect();
+        assert_eq!(super::stand_beside(Vec3::new(0.72, 4.639, 1.3), &mirrored), Some(mirrored[2]));
+    }
+
     #[test]
     fn the_window_seat_clicked_from_the_aisle_is_the_window_seat() {
         // a pair of seats facing forwards (+y): the aisle one at x = 0.45, the window one
